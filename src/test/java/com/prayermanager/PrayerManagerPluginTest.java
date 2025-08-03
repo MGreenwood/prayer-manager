@@ -1,6 +1,6 @@
 package com.prayermanager;
 
-import com.example.ExamplePlugin;
+import com.prayermanager.PrayerManager;
 import com.prayermanager.PrayerManager;
 import net.runelite.client.RuneLite;
 import net.runelite.client.externalplugins.ExternalPluginManager;
