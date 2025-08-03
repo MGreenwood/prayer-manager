@@ -5,6 +5,7 @@ import javax.inject.Inject;
 import javax.inject.Singleton;
 import net.runelite.api.Client;
 import net.runelite.api.GameState;
+import net.runelite.api.widgets.WidgetInfo;
 import net.runelite.client.ui.overlay.Overlay;
 import net.runelite.client.ui.overlay.OverlayLayer;
 import net.runelite.client.ui.overlay.OverlayPosition;
@@ -28,7 +29,7 @@ public class PrayerTimingOverlay extends Overlay
 
     public PrayerTimingOverlay()
     {
-        setPosition(OverlayPosition.TOP_CENTER);
+        setPosition(OverlayPosition.DYNAMIC);
         setPriority(OverlayPriority.HIGH);
         setLayer(OverlayLayer.ABOVE_WIDGETS);
     }
@@ -39,6 +40,18 @@ public class PrayerTimingOverlay extends Overlay
         if (client.getGameState() != GameState.LOGGED_IN || !config.showTimingBar())
         {
             return null;
+        }
+
+        // Try to position near the prayer orb
+        net.runelite.api.widgets.Widget prayerOrb = client.getWidget(WidgetInfo.MINIMAP_QUICK_PRAYER_ORB);
+        if (prayerOrb != null)
+        {
+            // Position the timing bar near the prayer orb
+            int orbX = prayerOrb.getCanvasLocation().getX();
+            int orbY = prayerOrb.getCanvasLocation().getY();
+            
+            // Offset the timing bar below the prayer orb
+            graphics.translate(orbX - BAR_WIDTH / 2, orbY + 30);
         }
 
         long currentTime = System.currentTimeMillis();
