@@ -5,6 +5,8 @@ import java.awt.event.MouseEvent;
 import java.awt.image.BufferedImage;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.logging.Logger;
+import java.util.logging.Level;
 import javax.inject.Inject;
 import javax.inject.Singleton;
 import net.runelite.api.Client;
@@ -21,20 +23,22 @@ import net.runelite.client.ui.overlay.OverlayPanel;
 import net.runelite.client.ui.overlay.OverlayPosition;
 import net.runelite.client.ui.overlay.OverlayPriority;
 import net.runelite.client.callback.ClientThread;
+import net.runelite.client.config.ConfigManager;
 
 
 @Singleton
 public class PrayerManagerOverlay extends OverlayPanel
 {
+    private static final Logger log = Logger.getLogger(PrayerManagerOverlay.class.getName());
+    
     private static final int PRAYER_TILE_WIDTH = 60;
     private static final int PRAYER_TILE_HEIGHT = 24;
     private static final int GRID_PADDING = 2;
     private static final int COMPONENT_SPACING = 5;
-    private static final Color SELECTED_COLOR = new Color(0, 255, 0, 120);
-    private static final Color UNSELECTED_COLOR = new Color(64, 64, 64, 120);
-    private static final Color HOVER_COLOR = new Color(128, 128, 128, 120);
-    private static final Color ACTIVE_BORDER_COLOR = new Color(255, 255, 0, 255);
-    private static final Color HOVER_BRIGHTNESS_MODIFIER = new Color(25, 25, 25, 0);
+    
+    // Transition animation constants
+    private static final long TRANSITION_DURATION = 150; // 150ms for smooth transitions
+    private static final int TRANSITION_STEPS = 10;
 
     @Inject
     private Client client;
@@ -44,6 +48,9 @@ public class PrayerManagerOverlay extends OverlayPanel
     
     @Inject
     private ClientThread clientThread;
+    
+    @Inject
+    private ConfigManager configManager;
 
 
 
@@ -56,150 +63,298 @@ public class PrayerManagerOverlay extends OverlayPanel
     private boolean isQuickPrayerButtonHovered = false;
     private boolean isQuickPrayerButtonClicked = false;
     private long buttonClickFeedbackTime = 0;
+    private boolean isDragging = false;
+    private Point dragStartPoint = null;
+    private Point overlayStartPosition = null;
+    
+    // Transition state tracking for smooth animations
+    private final Map<Prayer, TransitionState> prayerTransitions = new HashMap<>();
+    private TransitionState buttonTransition = new TransitionState();
+    
+    // Error handling state
+    private String lastError = null;
+    private long lastErrorTime = 0;
+    private static final long ERROR_DISPLAY_DURATION = 3000; // 3 seconds
+    
+    // Helper class for managing smooth transitions
+    private static class TransitionState
+    {
+        private Color currentColor;
+        private Color targetColor;
+        private long transitionStartTime;
+        private boolean isTransitioning;
+        
+        public TransitionState()
+        {
+            this.currentColor = null;
+            this.targetColor = null;
+            this.isTransitioning = false;
+        }
+        
+        public void startTransition(Color from, Color to)
+        {
+            if (from == null) from = to;
+            this.currentColor = from;
+            this.targetColor = to;
+            this.transitionStartTime = System.currentTimeMillis();
+            this.isTransitioning = true;
+        }
+        
+        public Color getCurrentColor()
+        {
+            if (!isTransitioning || currentColor == null || targetColor == null)
+            {
+                return targetColor != null ? targetColor : currentColor;
+            }
+            
+            long elapsed = System.currentTimeMillis() - transitionStartTime;
+            if (elapsed >= TRANSITION_DURATION)
+            {
+                isTransitioning = false;
+                currentColor = targetColor;
+                return currentColor;
+            }
+            
+            float progress = (float) elapsed / TRANSITION_DURATION;
+            return interpolateColor(currentColor, targetColor, progress);
+        }
+        
+        private Color interpolateColor(Color from, Color to, float progress)
+        {
+            progress = Math.max(0, Math.min(1, progress)); // Clamp to [0,1]
+            
+            int r = (int) (from.getRed() + (to.getRed() - from.getRed()) * progress);
+            int g = (int) (from.getGreen() + (to.getGreen() - from.getGreen()) * progress);
+            int b = (int) (from.getBlue() + (to.getBlue() - from.getBlue()) * progress);
+            int a = (int) (from.getAlpha() + (to.getAlpha() - from.getAlpha()) * progress);
+            
+            return new Color(r, g, b, a);
+        }
+    }
 
     public PrayerManagerOverlay()
     {
-        setPosition(OverlayPosition.TOP_LEFT);
+        setPosition(OverlayPosition.DYNAMIC);
         setDragTargetable(true);
-        setResizable(true);
+        setResizable(false);
         setPriority(OverlayPriority.HIGH);
+        setMovable(true);
     }
 
     @Override
     public Dimension render(Graphics2D graphics)
     {
-        if (client.getGameState() != GameState.LOGGED_IN)
+        try
         {
+            if (client.getGameState() != GameState.LOGGED_IN)
+            {
+                return null;
+            }
+
+            // Load saved position if not already loaded
+            loadSavedPosition();
+            
+            // Apply overlay opacity setting
+            float opacity = config.overlayOpacity() / 100.0f;
+            if (isDragging)
+            {
+                opacity *= 0.7f; // Additional transparency during drag
+            }
+            graphics.setComposite(AlphaComposite.getInstance(AlphaComposite.SRC_OVER, opacity));
+            
+            // Apply visual feedback during dragging
+            if (isDragging)
+            {
+                // Draw a border around the entire overlay during drag to show it's moving as one unit
+                Dimension size = getPreferredSize();
+                if (size != null)
+                {
+                    graphics.setColor(new Color(255, 255, 0, 100));
+                    graphics.setStroke(new BasicStroke(2.0f, BasicStroke.CAP_ROUND, BasicStroke.JOIN_ROUND, 0, new float[]{5}, 0));
+                    graphics.drawRect(0, 0, size.width - 1, size.height - 1);
+                }
+            }
+        }
+        catch (Exception e)
+        {
+            handleError("Error in overlay render setup", e);
             return null;
         }
 
         int yOffset = 0;
 
-        // Render prayer points bar
-        if (config.showPrayerPoints())
+        try
         {
-            yOffset += renderPrayerPointsBar(graphics, yOffset) + COMPONENT_SPACING;
+            // Render prayer points bar
+            if (config.showPrayerPoints())
+            {
+                yOffset += renderPrayerPointsBar(graphics, yOffset) + COMPONENT_SPACING;
+            }
+
+            // Render quick prayer button
+            if (config.showQuickPrayerButton())
+            {
+                yOffset += renderQuickPrayerButton(graphics, yOffset) + COMPONENT_SPACING;
+            }
+
+            // Render prayer grid
+            if (config.showPrayerGrid())
+            {
+                yOffset += renderPrayerGrid(graphics, yOffset);
+            }
+            
+            // Render error message if there's a recent error and error handling is not silent
+            if (shouldShowError())
+            {
+                yOffset += renderErrorMessage(graphics, yOffset) + COMPONENT_SPACING;
+            }
+        }
+        catch (Exception e)
+        {
+            handleError("Error rendering overlay components", e);
+            // Try to render a minimal error state
+            graphics.setColor(Color.RED);
+            graphics.drawString("Prayer Manager Error", 5, 15);
+            return new Dimension(200, 20);
         }
 
-        // Render quick prayer button
-        if (config.showQuickPrayerButton())
-        {
-            yOffset += renderQuickPrayerButton(graphics, yOffset) + COMPONENT_SPACING;
-        }
-
-        // Render prayer grid
-        if (config.showPrayerGrid())
-        {
-            yOffset += renderPrayerGrid(graphics, yOffset);
-        }
-
-        return new Dimension(getMaxWidth(), yOffset);
+        return new Dimension(getMaxWidth(), Math.max(yOffset, 1));
     }
 
     private int renderPrayerPointsBar(Graphics2D graphics, int yOffset)
     {
-        int currentPrayer = client.getBoostedSkillLevel(Skill.PRAYER);
-        int maxPrayer = client.getRealSkillLevel(Skill.PRAYER);
+        try
+        {
+            int currentPrayer = client.getBoostedSkillLevel(Skill.PRAYER);
+            int maxPrayer = client.getRealSkillLevel(Skill.PRAYER);
 
-        if (maxPrayer == 0) return 0;
+            if (maxPrayer == 0) return 0;
 
-        int barWidth = 200;
-        int barHeight = 20;
-        double percentage = (double) currentPrayer / maxPrayer;
+            int barWidth = 200;
+            int barHeight = 20;
+            double percentage = (double) currentPrayer / maxPrayer;
 
-        // Draw background
-        graphics.setColor(new Color(64, 64, 64));
-        graphics.fillRect(0, yOffset, barWidth, barHeight);
+            // Draw background
+            graphics.setColor(new Color(64, 64, 64));
+            graphics.fillRect(0, yOffset, barWidth, barHeight);
 
-        // Draw prayer bar with gradient
-        int fillWidth = (int) (barWidth * percentage);
-        Color barColor = percentage > 0.5 ? Color.GREEN :
-                percentage > 0.25 ? Color.YELLOW : Color.RED;
-        graphics.setColor(barColor);
-        graphics.fillRect(0, yOffset, fillWidth, barHeight);
+            // Draw prayer bar using configured color scheme
+            int fillWidth = (int) (barWidth * percentage);
+            Color barColor = config.prayerPointsBarColor().getColorForPercentage(percentage);
+            graphics.setColor(barColor);
+            graphics.fillRect(0, yOffset, fillWidth, barHeight);
 
-        // Draw border
-        graphics.setColor(Color.WHITE);
-        graphics.drawRect(0, yOffset, barWidth - 1, barHeight - 1);
+            // Draw border using configured border color
+            graphics.setColor(config.borderColor());
+            graphics.drawRect(0, yOffset, barWidth - 1, barHeight - 1);
 
-        // Draw text
-        String prayerText = currentPrayer + " / " + maxPrayer;
-        FontMetrics fm = graphics.getFontMetrics();
-        int textX = (barWidth - fm.stringWidth(prayerText)) / 2;
-        int textY = yOffset + (barHeight + fm.getAscent()) / 2;
+            // Draw text using configured text color
+            String prayerText = currentPrayer + " / " + maxPrayer;
+            FontMetrics fm = graphics.getFontMetrics();
+            int textX = (barWidth - fm.stringWidth(prayerText)) / 2;
+            int textY = yOffset + (barHeight + fm.getAscent()) / 2;
 
-        graphics.setColor(Color.BLACK);
-        graphics.drawString(prayerText, textX + 1, textY + 1);
-        graphics.setColor(Color.WHITE);
-        graphics.drawString(prayerText, textX, textY);
+            // Text shadow for better readability
+            graphics.setColor(Color.BLACK);
+            graphics.drawString(prayerText, textX + 1, textY + 1);
+            graphics.setColor(config.textColor());
+            graphics.drawString(prayerText, textX, textY);
 
-        return barHeight;
+            return barHeight;
+        }
+        catch (Exception e)
+        {
+            handleError("Error rendering prayer points bar", e);
+            return 0;
+        }
     }
 
     private int renderQuickPrayerButton(Graphics2D graphics, int yOffset)
     {
-        int buttonSize = config.quickPrayerButtonSize().getSize();
-        boolean quickPrayerActive = client.getVarbitValue(Varbits.QUICK_PRAYER) == 1;
-        Color baseColor = config.quickPrayerButtonColor();
-
-        quickPrayerButtonBounds = new Rectangle(0, yOffset, buttonSize, buttonSize);
-
-        // Determine button state and colors
-        Color backgroundColor = getButtonBackgroundColor(baseColor, quickPrayerActive);
-        
-        // Apply hover effect if button is hovered
-        if (isQuickPrayerButtonHovered)
+        try
         {
-            backgroundColor = brightenColor(backgroundColor, 0.1f);
-        }
-        
-        // Apply click feedback effect
-        boolean isClickFeedbackActive = isQuickPrayerButtonClicked && 
-                                      (System.currentTimeMillis() - buttonClickFeedbackTime) < CLICK_FEEDBACK_DURATION;
-        if (isClickFeedbackActive)
-        {
-            // Scale animation effect - draw slightly smaller then back to normal
-            long elapsed = System.currentTimeMillis() - buttonClickFeedbackTime;
-            float scale = elapsed < CLICK_FEEDBACK_DURATION / 2 ? 0.95f : 1.0f;
-            int scaledSize = (int) (buttonSize * scale);
-            int offset = (buttonSize - scaledSize) / 2;
+            int buttonSize = config.quickPrayerButtonSize().getSize();
+            boolean quickPrayerActive = client.getVarbitValue(Varbits.QUICK_PRAYER) == 1;
+            Color baseColor = config.quickPrayerButtonColor();
+
+            quickPrayerButtonBounds = new Rectangle(0, yOffset, buttonSize, buttonSize);
+
+            // Determine button state and colors
+            Color backgroundColor = getButtonBackgroundColor(baseColor, quickPrayerActive);
             
-            graphics.setColor(backgroundColor);
-            graphics.fillRect(offset, yOffset + offset, scaledSize, scaledSize);
+            // Apply hover effect if enabled and button is hovered
+            if (config.enableHoverEffects() && isQuickPrayerButtonHovered)
+            {
+                backgroundColor = brightenColor(backgroundColor, 0.1f);
+            }
             
-            // Draw border for scaled button
-            graphics.setColor(quickPrayerActive ? ACTIVE_BORDER_COLOR : Color.WHITE);
-            graphics.drawRect(offset, yOffset + offset, scaledSize - 1, scaledSize - 1);
+            // Handle smooth transitions if enabled
+            if (config.enableSmoothTransitions())
+            {
+                Color targetColor = backgroundColor;
+                if (buttonTransition.currentColor == null || 
+                    !colorsEqual(buttonTransition.targetColor, targetColor))
+                {
+                    buttonTransition.startTransition(buttonTransition.currentColor, targetColor);
+                }
+                backgroundColor = buttonTransition.getCurrentColor();
+            }
+            
+            // Apply click feedback effect if enabled
+            boolean isClickFeedbackActive = config.enableClickFeedback() && 
+                                          isQuickPrayerButtonClicked && 
+                                          (System.currentTimeMillis() - buttonClickFeedbackTime) < CLICK_FEEDBACK_DURATION;
+            if (isClickFeedbackActive)
+            {
+                // Scale animation effect - draw slightly smaller then back to normal
+                long elapsed = System.currentTimeMillis() - buttonClickFeedbackTime;
+                float scale = elapsed < CLICK_FEEDBACK_DURATION / 2 ? 0.95f : 1.0f;
+                int scaledSize = (int) (buttonSize * scale);
+                int offset = (buttonSize - scaledSize) / 2;
+                
+                graphics.setColor(backgroundColor);
+                graphics.fillRect(offset, yOffset + offset, scaledSize, scaledSize);
+                
+                // Draw border for scaled button
+                graphics.setColor(quickPrayerActive ? config.activeBorderColor() : config.borderColor());
+                graphics.drawRect(offset, yOffset + offset, scaledSize - 1, scaledSize - 1);
+            }
+            else
+            {
+                // Draw normal button background
+                graphics.setColor(backgroundColor);
+                graphics.fillRect(0, yOffset, buttonSize, buttonSize);
+
+                // Draw border using configured colors
+                graphics.setColor(quickPrayerActive ? config.activeBorderColor() : config.borderColor());
+                graphics.drawRect(0, yOffset, buttonSize - 1, buttonSize - 1);
+            }
+
+            // Draw "QP" text using configured text color
+            FontMetrics fm = graphics.getFontMetrics();
+            String text = "QP";
+            int textX = (buttonSize - fm.stringWidth(text)) / 2;
+            int textY = yOffset + (buttonSize + fm.getAscent()) / 2;
+            
+            // Add text shadow for better readability
+            graphics.setColor(Color.BLACK);
+            graphics.drawString(text, textX + 1, textY + 1);
+            graphics.setColor(config.textColor());
+            graphics.drawString(text, textX, textY);
+
+            return buttonSize;
         }
-        else
+        catch (Exception e)
         {
-            // Draw normal button background
-            graphics.setColor(backgroundColor);
-            graphics.fillRect(0, yOffset, buttonSize, buttonSize);
-
-            // Draw border - yellow for active, white for inactive
-            graphics.setColor(quickPrayerActive ? ACTIVE_BORDER_COLOR : Color.WHITE);
-            graphics.drawRect(0, yOffset, buttonSize - 1, buttonSize - 1);
+            handleError("Error rendering quick prayer button", e);
+            return config.quickPrayerButtonSize().getSize(); // Return expected size even on error
         }
-
-        // Draw "QP" text
-        graphics.setColor(Color.WHITE);
-        FontMetrics fm = graphics.getFontMetrics();
-        String text = "QP";
-        int textX = (buttonSize - fm.stringWidth(text)) / 2;
-        int textY = yOffset + (buttonSize + fm.getAscent()) / 2;
-        
-        // Add text shadow for better readability
-        graphics.setColor(Color.BLACK);
-        graphics.drawString(text, textX + 1, textY + 1);
-        graphics.setColor(Color.WHITE);
-        graphics.drawString(text, textX, textY);
-
-        return buttonSize;
     }
     
     private Color getButtonBackgroundColor(Color baseColor, boolean isActive)
     {
+        if (baseColor == null) baseColor = Color.BLUE; // Fallback
+        
         if (isActive)
         {
             // Active: full opacity
@@ -214,6 +369,8 @@ public class PrayerManagerOverlay extends OverlayPanel
     
     private Color brightenColor(Color color, float factor)
     {
+        if (color == null) return null;
+        
         int r = Math.min(255, (int) (color.getRed() * (1 + factor)));
         int g = Math.min(255, (int) (color.getGreen() * (1 + factor)));
         int b = Math.min(255, (int) (color.getBlue() * (1 + factor)));
@@ -262,34 +419,48 @@ public class PrayerManagerOverlay extends OverlayPanel
 
             // Check if prayer is selected in quick prayers
             boolean isSelected = isQuickPrayerSelected(prayer);
-            boolean isHovered = prayer.equals(hoveredPrayer);
-            boolean isClicked = prayer.equals(clickedPrayer) && 
+            boolean isHovered = config.enableHoverEffects() && prayer.equals(hoveredPrayer);
+            boolean isClicked = config.enableClickFeedback() && 
+                              prayer.equals(clickedPrayer) && 
                               (System.currentTimeMillis() - clickFeedbackTime) < CLICK_FEEDBACK_DURATION;
 
-            // Determine background color based on state
+            // Determine background color based on state using configured colors
             Color backgroundColor;
             if (isClicked) {
                 // Bright flash for click feedback
                 backgroundColor = new Color(255, 255, 255, 180);
             } else if (isSelected) {
-                backgroundColor = SELECTED_COLOR;
+                backgroundColor = config.selectedPrayerColor();
             } else if (isHovered) {
-                backgroundColor = HOVER_COLOR;
+                backgroundColor = config.hoverColor();
             } else {
-                backgroundColor = UNSELECTED_COLOR;
+                backgroundColor = config.unselectedPrayerColor();
+            }
+            
+            // Handle smooth transitions if enabled
+            if (config.enableSmoothTransitions())
+            {
+                TransitionState transition = prayerTransitions.computeIfAbsent(prayer, k -> new TransitionState());
+                if (transition.currentColor == null || 
+                    !colorsEqual(transition.targetColor, backgroundColor))
+                {
+                    transition.startTransition(transition.currentColor, backgroundColor);
+                }
+                backgroundColor = transition.getCurrentColor();
             }
 
             // Draw prayer tile background
             graphics.setColor(backgroundColor);
             graphics.fillRect(x, y, PRAYER_TILE_WIDTH, PRAYER_TILE_HEIGHT);
 
-            // Draw prayer tile border
-            graphics.setColor(Color.WHITE);
+            // Draw prayer tile border using configured border color
+            graphics.setColor(config.borderColor());
             graphics.drawRect(x, y, PRAYER_TILE_WIDTH - 1, PRAYER_TILE_HEIGHT - 1);
 
-            // Add hover effect with brighter border
-            if (isHovered) {
-                graphics.setColor(new Color(200, 200, 200));
+            // Add hover effect with brighter border if enabled
+            if (isHovered && config.enableHoverEffects()) {
+                Color hoverBorderColor = brightenColor(config.borderColor(), 0.3f);
+                graphics.setColor(hoverBorderColor);
                 graphics.drawRect(x + 1, y + 1, PRAYER_TILE_WIDTH - 3, PRAYER_TILE_HEIGHT - 3);
             }
 
@@ -305,8 +476,8 @@ public class PrayerManagerOverlay extends OverlayPanel
             graphics.setColor(Color.BLACK);
             graphics.drawString(prayerName, textX + 1, textY + 1);
             
-            // Draw main text
-            graphics.setColor(Color.WHITE);
+            // Draw main text using configured text color
+            graphics.setColor(config.textColor());
             graphics.drawString(prayerName, textX, textY);
         }
 
@@ -546,6 +717,12 @@ public class PrayerManagerOverlay extends OverlayPanel
     @Override
     public Rectangle getBounds()
     {
+        Point location = getPreferredLocation();
+        if (location == null)
+        {
+            location = new Point(0, 0);
+        }
+        
         // Calculate actual overlay height based on enabled components
         int totalHeight = 0;
         
@@ -573,7 +750,7 @@ public class PrayerManagerOverlay extends OverlayPanel
             totalHeight -= COMPONENT_SPACING;
         }
         
-        return new Rectangle(0, 0, getMaxWidth(), Math.max(totalHeight, 1));
+        return new Rectangle(location.x, location.y, getMaxWidth(), Math.max(totalHeight, 1));
     }
 
     public void updatePrayerStates()
@@ -623,28 +800,41 @@ public class PrayerManagerOverlay extends OverlayPanel
     {
         // For RuneLite OverlayPanel, the mouse coordinates need to be converted
         // from screen coordinates to overlay-relative coordinates
-        Rectangle panelBounds = super.getBounds();
-        if (panelBounds == null)
+        Point location = getPreferredLocation();
+        if (location == null)
         {
-            return new Point(0, 0);
+            location = new Point(0, 0);
         }
         
         // Convert screen coordinates to overlay-relative coordinates
-        return new Point(screenPoint.x - panelBounds.x, screenPoint.y - panelBounds.y);
+        return new Point(screenPoint.x - location.x, screenPoint.y - location.y);
     }
 
     /**
      * Handles mouse click events for the overlay.
-     * Returns the original event - consumption is handled differently.
+     * Returns null if the event should be consumed, otherwise returns the original event.
      */
     public MouseEvent handleMouseClick(MouseEvent mouseEvent)
     {
-        if (isWithinOverlayBounds(mouseEvent.getPoint()))
+        Point clickPoint = mouseEvent.getPoint();
+        
+        if (isWithinOverlayBounds(clickPoint))
         {
-            handleOverlayClick(mouseEvent);
-            // Don't return null - let the event continue but mark it as handled
+            // Check if the click is on an interactive element
+            if (isWithinInteractiveElement(clickPoint))
+            {
+                handleOverlayClick(mouseEvent);
+                mouseEvent.consume(); // Consume the event to prevent pass-through
+                return mouseEvent;
+            }
+            else
+            {
+                // Click is within overlay bounds but not on an interactive element
+                mouseEvent.consume(); // Still consume to prevent pass-through
+                return mouseEvent;
+            }
         }
-        return mouseEvent;
+        return mouseEvent; // Let the event pass through if outside overlay
     }
 
     /**
@@ -659,7 +849,8 @@ public class PrayerManagerOverlay extends OverlayPanel
         
         if (isWithinOverlayBounds(mouseEvent.getPoint()))
         {
-            // Don't consume press events, let them through
+            // Consume press events within overlay bounds to prevent pass-through
+            mouseEvent.consume();
             return mouseEvent;
         }
         return mouseEvent;
@@ -677,7 +868,8 @@ public class PrayerManagerOverlay extends OverlayPanel
         
         if (isWithinOverlayBounds(mouseEvent.getPoint()))
         {
-            // Don't consume release events, let them through
+            // Consume release events within overlay bounds to prevent pass-through
+            mouseEvent.consume();
             return mouseEvent;
         }
         return mouseEvent;
@@ -726,22 +918,9 @@ public class PrayerManagerOverlay extends OverlayPanel
 
     private boolean isWithinOverlayBounds(Point point)
     {
-        // For OverlayPanel, we need to check if the point is within our rendered area
-        // The overlay's position is managed by RuneLite, so we check against our content bounds
-        Rectangle contentBounds = getBounds();
-        
-        // Get the overlay's actual position from the panel bounds
-        Rectangle panelBounds = super.getBounds();
-        if (panelBounds != null)
-        {
-            // Create a rectangle representing our actual screen area
-            Rectangle screenBounds = new Rectangle(panelBounds.x, panelBounds.y, 
-                                                 contentBounds.width, contentBounds.height);
-            return screenBounds.contains(point);
-        }
-        
-
-        return false;
+        // Get the actual screen bounds of the overlay using our custom getBounds method
+        Rectangle panelBounds = getBounds();
+        return panelBounds != null && panelBounds.contains(point);
     }
 
     private boolean isWithinInteractiveElement(Point point)
@@ -811,35 +990,34 @@ public class PrayerManagerOverlay extends OverlayPanel
                     
                     System.out.println("Attempting to toggle quick prayer: " + option);
                     
-                    // Approach 1: Try the minimap orb with different parameters
+                    // Try to toggle quick prayer using menuAction with correct parameters
                     try {
-                        int orbWidgetId = WidgetInfo.MINIMAP_QUICK_PRAYER_ORB.getId();
+                        // Use the correct parameters for quick prayer toggle
                         client.menuAction(
-                            1, // p0 - try 1 for first option
-                            orbWidgetId, // p1 - widget id
-                            MenuAction.CC_OP, // action
-                            orbWidgetId, // id
+                            0, // p0 - action index (0 for first action)
+                            WidgetInfo.MINIMAP_QUICK_PRAYER_ORB.getId(), // p1 - widget id
+                            MenuAction.CC_OP, // action type
+                            0, // id
                             -1, // itemId
-                            option, // option
-                            target // target
+                            option, // option text
+                            target // target text
                         );
-                        System.out.println("Tried minimap orb approach");
+                        System.out.println("Used menuAction with corrected parameters");
                     } catch (Exception e1) {
-                        System.out.println("Minimap orb approach failed: " + e1.getMessage());
+                        System.out.println("MenuAction approach failed: " + e1.getMessage());
                         
-                        // Approach 2: Try using the prayer tab quick prayer button
+                        // Alternative approach: Try clicking the prayer tab quick prayer button
                         try {
-                            // The quick prayer button in the prayer tab might have a different widget ID
                             client.menuAction(
                                 0, // p0
                                 0, // p1
                                 MenuAction.WIDGET_FIRST_OPTION, // action
-                                1, // id - generic component click
+                                1, // id
                                 -1, // itemId
-                                option, // option
-                                target // target
+                                "Quick-prayers", // option
+                                "" // target
                             );
-                            System.out.println("Tried prayer tab approach");
+                            System.out.println("Tried prayer tab quick prayer button");
                         } catch (Exception e2) {
                             System.out.println("Prayer tab approach also failed: " + e2.getMessage());
                         }
@@ -847,14 +1025,14 @@ public class PrayerManagerOverlay extends OverlayPanel
                     
                     System.out.println("Toggled quick prayer: " + (currentState ? "OFF" : "ON"));
                 } catch (Exception e) {
-                    System.err.println("Failed to toggle quick prayer: " + e.getMessage());
+                    handleError("Failed to toggle quick prayer", e);
                 }
             });
             
         }
         catch (Exception e)
         {
-            System.err.println("Failed to handle quick prayer button click: " + e.getMessage());
+            handleError("Failed to handle quick prayer button click", e);
         }
     }
 
@@ -883,14 +1061,14 @@ public class PrayerManagerOverlay extends OverlayPanel
                     // Toggle the quick prayer selection for this prayer
                     toggleQuickPrayerSelection(prayer);
                 } catch (Exception e) {
-                    System.err.println("Failed to process prayer tile click: " + e.getMessage());
+                    handleError("Failed to process prayer tile click", e);
                 }
             });
             
         }
         catch (Exception e)
         {
-            System.err.println("Failed to handle prayer tile click: " + e.getMessage());
+            handleError("Failed to handle prayer tile click", e);
         }
     }
 
@@ -933,7 +1111,7 @@ public class PrayerManagerOverlay extends OverlayPanel
         }
         catch (Exception e)
         {
-            System.err.println("Failed to toggle quick prayer selection for " + prayer.name() + ": " + e.getMessage());
+            handleError("Failed to toggle quick prayer selection for " + prayer.name(), e);
         }
     }
 
@@ -1005,4 +1183,175 @@ public class PrayerManagerOverlay extends OverlayPanel
     }
 
 
+    
+    // Position management methods
+    private void loadSavedPosition()
+    {
+        int savedX = config.prayerGridPositionX();
+        int savedY = config.prayerGridPositionY();
+        
+        if (savedX != -1 && savedY != -1)
+        {
+            setPreferredLocation(new Point(savedX, savedY));
+        }
+    }
+    
+    private void savePosition()
+    {
+        Point position = getPreferredLocation();
+        if (position != null)
+        {
+            configManager.setConfiguration("prayermanager", "prayerGridPositionX", position.x);
+            configManager.setConfiguration("prayermanager", "prayerGridPositionY", position.y);
+        }
+    }
+    
+    // Custom drag handling through mouse events
+    public void startDrag(Point point)
+    {
+        isDragging = true;
+        dragStartPoint = new Point(point);
+        overlayStartPosition = getPreferredLocation();
+        if (overlayStartPosition == null)
+        {
+            overlayStartPosition = new Point(0, 0);
+        }
+    }
+    
+    public void updateDrag(Point point)
+    {
+        if (isDragging && dragStartPoint != null && overlayStartPosition != null)
+        {
+            int deltaX = point.x - dragStartPoint.x;
+            int deltaY = point.y - dragStartPoint.y;
+            
+            Point newPosition = new Point(
+                overlayStartPosition.x + deltaX,
+                overlayStartPosition.y + deltaY
+            );
+            
+            setPreferredLocation(newPosition);
+        }
+    }
+    
+    public void completeDrag()
+    {
+        isDragging = false;
+        dragStartPoint = null;
+        overlayStartPosition = null;
+        
+        // Save the new position
+        savePosition();
+    }
+    
+    // Helper methods for UI polish and error handling
+    
+    private void handleError(String message, Exception e)
+    {
+        lastError = message;
+        lastErrorTime = System.currentTimeMillis();
+        
+        PrayerManagerConfig.ErrorHandlingMode mode = config.errorHandlingMode();
+        
+        switch (mode)
+        {
+            case STRICT:
+                log.log(Level.SEVERE, message, e);
+                break;
+            case GRACEFUL:
+                if (e instanceof RuntimeException)
+                {
+                    log.log(Level.WARNING, message + ": " + e.getMessage());
+                }
+                break;
+            case SILENT:
+                // Only log to debug level
+                log.log(Level.FINE, message, e);
+                break;
+        }
+    }
+    
+    private boolean shouldShowError()
+    {
+        if (lastError == null || config.errorHandlingMode() == PrayerManagerConfig.ErrorHandlingMode.SILENT)
+        {
+            return false;
+        }
+        
+        return (System.currentTimeMillis() - lastErrorTime) < ERROR_DISPLAY_DURATION;
+    }
+    
+    private int renderErrorMessage(Graphics2D graphics, int yOffset)
+    {
+        if (lastError == null) return 0;
+        
+        int errorHeight = 15;
+        int errorWidth = getMaxWidth();
+        
+        // Draw error background
+        graphics.setColor(new Color(139, 0, 0, 100)); // Dark red background
+        graphics.fillRect(0, yOffset, errorWidth, errorHeight);
+        
+        // Draw error border
+        graphics.setColor(Color.RED);
+        graphics.drawRect(0, yOffset, errorWidth - 1, errorHeight - 1);
+        
+        // Draw error text
+        graphics.setColor(Color.WHITE);
+        FontMetrics fm = graphics.getFontMetrics();
+        String errorText = "Error: " + lastError;
+        
+        // Truncate if too long
+        if (fm.stringWidth(errorText) > errorWidth - 10)
+        {
+            while (fm.stringWidth(errorText + "...") > errorWidth - 10 && errorText.length() > 10)
+            {
+                errorText = errorText.substring(0, errorText.length() - 1);
+            }
+            errorText += "...";
+        }
+        
+        int textX = 5;
+        int textY = yOffset + (errorHeight + fm.getAscent()) / 2;
+        graphics.drawString(errorText, textX, textY);
+        
+        return errorHeight;
+    }
+    
+    private boolean colorsEqual(Color c1, Color c2)
+    {
+        if (c1 == null && c2 == null) return true;
+        if (c1 == null || c2 == null) return false;
+        
+        return c1.getRed() == c2.getRed() &&
+               c1.getGreen() == c2.getGreen() &&
+               c1.getBlue() == c2.getBlue() &&
+               c1.getAlpha() == c2.getAlpha();
+    }
+
+    // RuneLite overlay mouse event handlers - these are called by RuneLite
+    public MouseEvent mouseClicked(MouseEvent mouseEvent)
+    {
+        return handleMouseClick(mouseEvent);
+    }
+
+    public MouseEvent mousePressed(MouseEvent mouseEvent)
+    {
+        return handleMousePress(mouseEvent);
+    }
+
+    public MouseEvent mouseReleased(MouseEvent mouseEvent)
+    {
+        return handleMouseRelease(mouseEvent);
+    }
+
+    public MouseEvent mouseMoved(MouseEvent mouseEvent)
+    {
+        return handleMouseMove(mouseEvent);
+    }
+
+    public MouseEvent mouseDragged(MouseEvent mouseEvent)
+    {
+        return handleMouseMove(mouseEvent); // Reuse move logic for drag
+    }
 }

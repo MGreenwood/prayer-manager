@@ -51,13 +51,7 @@ public class PrayerManager extends Plugin
         @Override
         public MouseEvent mouseClicked(MouseEvent mouseEvent)
         {
-            // Check timing overlay first (higher priority for independence)
-            if (prayerTimingOverlay.handleMouseClick(mouseEvent.getPoint()))
-            {
-                return null; // Event consumed by timing overlay
-            }
-            
-            // Let the prayer manager overlay handle the click and consume it if necessary
+            // Let the overlay handle the click and consume it if necessary
             MouseEvent result = prayerManagerOverlay.handleMouseClick(mouseEvent);
             if (result == null)
             {
@@ -76,46 +70,21 @@ public class PrayerManager extends Plugin
         @Override
         public MouseEvent mousePressed(MouseEvent mouseEvent)
         {
-            // Check timing overlay first for drag initiation
-            if (prayerTimingOverlay.handleMousePress(mouseEvent.getPoint()))
-            {
-                return null; // Event consumed by timing overlay
-            }
-            
-            // Let the prayer manager overlay handle the press and consume it if necessary
+            // Let the overlay handle the press and consume it if necessary
             return prayerManagerOverlay.handleMousePress(mouseEvent);
         }
 
         @Override
         public MouseEvent mouseReleased(MouseEvent mouseEvent)
         {
-            // Check timing overlay first for drag completion
-            if (prayerTimingOverlay.handleMouseRelease(mouseEvent.getPoint()))
-            {
-                return null; // Event consumed by timing overlay
-            }
-            
-            // Let the prayer manager overlay handle the release and consume it if necessary
+            // Let the overlay handle the release and consume it if necessary
             return prayerManagerOverlay.handleMouseRelease(mouseEvent);
         }
 
         @Override
         public MouseEvent mouseMoved(MouseEvent mouseEvent)
         {
-            // Let the prayer manager overlay handle mouse movement for hover effects
-            return prayerManagerOverlay.handleMouseMove(mouseEvent);
-        }
-        
-        @Override
-        public MouseEvent mouseDragged(MouseEvent mouseEvent)
-        {
-            // Check timing overlay first for drag updates
-            if (prayerTimingOverlay.handleMouseDrag(mouseEvent.getPoint()))
-            {
-                return null; // Event consumed by timing overlay
-            }
-            
-            // Let the prayer manager overlay handle dragging
+            // Let the overlay handle mouse movement for hover effects
             return prayerManagerOverlay.handleMouseMove(mouseEvent);
         }
     };
@@ -146,6 +115,13 @@ public class PrayerManager extends Plugin
             toggleQuickPrayer();
             return;
         }
+
+        // Check if a prayer in the grid was clicked
+        Prayer clickedPrayer = prayerManagerOverlay.getPrayerAtPoint(mouseEvent.getPoint());
+        if (clickedPrayer != null)
+        {
+            toggleQuickPrayerSelection(clickedPrayer);
+        }
     }
 
     private void toggleQuickPrayer()
@@ -153,6 +129,13 @@ public class PrayerManager extends Plugin
         // This method is now handled by the overlay directly
         // Keeping for backward compatibility but functionality moved to overlay
         log.info("Quick Prayer button clicked - handled by overlay");
+    }
+
+    private void toggleQuickPrayerSelection(Prayer prayer)
+    {
+        // This method is now handled by the overlay directly
+        // Keeping for backward compatibility but functionality moved to overlay
+        log.info("Prayer clicked: " + prayer.name() + " - handled by overlay");
     }
 
     private Widget getPrayerWidget(Prayer prayer)
